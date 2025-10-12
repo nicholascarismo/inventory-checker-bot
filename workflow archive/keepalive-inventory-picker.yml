@@ -1,0 +1,44 @@
+name: Keep Render Warm (inventory-picker)
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"    # every 10 minutes
+  workflow_dispatch:
+
+concurrency:
+  group: keepalive-inventory-picker
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Ping /health to keep awake
+        run: |
+          set -e
+          BASE="https://inventory-picker.onrender.com"
+          TS=$(date +%s)
+          for i in $(seq 1 8); do
+            echo "Attempt $i..."
+            CODE=$(curl -sS --location \
+              --connect-timeout 20 --max-time 60 \
+              -o /dev/null -w "%{http_code}" \
+              "$BASE/health?ts=$TS&i=$i") || true
+            echo "HTTP ${CODE:-<none>}"
+            [ "$CODE" = "200" ] && { echo "✅ Warm OK"; exit 0; }
+            sleep $((10 + 5*i))   # 15,20,25,… seconds
+          done
+          echo "❌ Could not reach /health"
+          exit 1
+
+      - name: Notify Slack on failure (optional)
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$WEBHOOK" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\"❌ *Keep Render Warm (inventory-picker)* failed.\nRepo: ${{ github.repository }}\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+              "$WEBHOOK"
+          fi

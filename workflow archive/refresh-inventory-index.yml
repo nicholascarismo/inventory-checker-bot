@@ -1,0 +1,61 @@
+name: Refresh Inventory Index (inventory-picker)
+
+on:
+  schedule:
+    - cron: "0 * * * *"     # hourly is plenty since the app refreshes every 20m itself
+  workflow_dispatch:
+
+concurrency:
+  group: refresh-inventory-index
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25     # allow cold starts + retries
+    steps:
+      - name: Warm service (/health) with retries
+        run: |
+          set -e
+          BASE="https://inventory-picker.onrender.com"
+          for i in $(seq 1 10); do
+            CODE=$(curl -sS --location \
+              --retry 3 --retry-delay 2 --retry-all-errors --retry-connrefused \
+              --connect-timeout 15 --max-time 90 \
+              -o /dev/null -w "%{http_code}" \
+              "$BASE/health?i=$i") || true
+            echo "Warm attempt $i -> HTTP ${CODE:-<none>}"
+            if [ "$CODE" = "200" ]; then
+              echo "✅ Service warm"
+              break
+            fi
+            sleep $((5*i))   # 5,10,15,… backoff
+          done
+
+      - name: Trigger /refresh (expects 200/202)
+        run: |
+          set -e
+          BASE="https://inventory-picker.onrender.com"
+          TS=$(date +%s)
+          for i in $(seq 1 6); do
+            CODE=$(curl -sS --location \
+              --retry 3 --retry-delay 2 --retry-all-errors --retry-connrefused \
+              --connect-timeout 20 --max-time 120 \
+              -o /dev/null -w "%{http_code}" \
+              "$BASE/refresh?ts=$TS&i=$i") || true
+            echo "Refresh attempt $i -> HTTP ${CODE:-<none>}"
+            if [ "$CODE" = "200" ] || [ "$CODE" = "202" ]; then
+              echo "✅ Refresh accepted ($CODE)"
+              exit 0
+            fi
+            sleep $((10*i))  # 10,20,30,… seconds
+          done
+          echo "❌ Could not reach /refresh successfully"
+          exit 1
+
+      - name: Verify /health after refresh
+        run: |
+          set -e
+          BASE="https://inventory-picker.onrender.com"
+          curl -sS --location --connect-timeout 15 --max-time 45 \
+            -o /dev/null -w "%{http_code}\n" "$BASE/health?post=1"

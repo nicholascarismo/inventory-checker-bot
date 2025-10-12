@@ -1,0 +1,14 @@
+{
+  "name": "inventory-picker",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@slack/bolt": "^3.18.0",
+    "dotenv": "^16.4.5"
+  }
+}

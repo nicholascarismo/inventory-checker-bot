@@ -1,0 +1,29 @@
+cat >> .gitignore <<'EOF'
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-lock.yaml
+
+# Env & secrets
+.env
+.env.*        # e.g. .env.local, .env.production
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Build artifacts
+dist/
+build/
+coverage/
+
+# Editors
+.vscode/
+.idea/
+EOF
+process.env
