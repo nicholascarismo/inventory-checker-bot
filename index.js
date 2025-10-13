@@ -538,7 +538,6 @@ app.view('stock_picker_submit', async ({ ack, body, view, client }) => {
   if (!type) errors['type_block'] = 'Please choose a Product Type.';
   if (!car)  errors['car_block']  = 'Please choose a Car.';
 
-const car  = view.state.values?.car_block?.car_select?.selected_option?.value;
 
 // reject placeholder
 if (car === '__disabled__') {
