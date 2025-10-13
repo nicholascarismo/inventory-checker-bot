@@ -41,7 +41,5 @@ jobs:
             cd \"${{ secrets.REMOTE_DIR }}\";
             export NPM_CONFIG_FUND=false;
             npm ci --omit=dev;
-            pm2 describe inventory-picker-socket >/dev/null 2>&1
-              && pm2 reload inventory-picker-socket --update-env
-              || pm2 start index.js --name inventory-picker-socket;
+            if pm2 describe inventory-picker-socket >/dev/null 2>&1; then pm2 reload inventory-picker-socket --update-env; else pm2 start index.js --name inventory-picker-socket; fi;
             pm2 save'"
