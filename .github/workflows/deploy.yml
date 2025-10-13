@@ -1,64 +1,47 @@
-name: Deploy to VPS (inventory-picker-socket)
+name: Deploy to VPS
 
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    # Make secrets available to ALL steps
-    env:
-      DROPLET_HOST: ${{ secrets.DROPLET_HOST }}
-      DROPLET_USER: ${{ secrets.DROPLET_USER }}
-      REMOTE_DIR:   ${{ secrets.REMOTE_DIR }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Add SSH key
+      - name: Start ssh-agent and add key
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Prime known_hosts (avoid prompt)
+      - name: Add droplet host key to known_hosts
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H "$DROPLET_HOST" >> ~/.ssh/known_hosts
+          ssh-keyscan -p 22 ${{ secrets.DROPLET_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Ensure remote folder exists
-        run: |
-          ssh "$DROPLET_USER@$DROPLET_HOST" "mkdir -p '$REMOTE_DIR'"
+      - name: Ensure remote directory exists
+        run: ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "mkdir -p '${{ secrets.REMOTE_DIR }}'"
 
-      - name: Rsync repo to server (preserve .env)
+      - name: Rsync repo to droplet (exclude local-only files)
         run: |
-          rsync -avz --delete \
+          rsync -az --delete \
+            --exclude '.env' \
+            --exclude 'node_modules' \
             --exclude '.git' \
             --exclude '.github' \
-            --exclude 'node_modules' \
-            --exclude '.env' \
-            ./ "$DROPLET_USER@$DROPLET_HOST:$REMOTE_DIR/"
+            ./  "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/"
 
       - name: Install deps & reload PM2 on VPS
-        run: |
-          ssh "$DROPLET_USER@$DROPLET_HOST" bash -lc '
-            set -euo pipefail
-            cd "$REMOTE_DIR"
-
-            # Load shared/app env (for npm scripts that may need it)
-            set -a
-            [ -f "$HOME/.shared_env" ] && . "$HOME/.shared_env"
-            [ -f ".env" ] && . ".env"
-            set +a
-
-            # Install deps (production only; fallback to full if lock mismatch)
-            npm ci --omit=dev || npm ci
-
-            # Start or reload pm2 process
-            pm2 describe inventory-picker-socket >/dev/null 2>&1 || pm2 start index.js --name inventory-picker-socket
-            pm2 reload inventory-picker-socket
-            pm2 save
-          '
+        run: >
+          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}"
+          "bash -lc 'set -euo pipefail;
+            cd \"${{ secrets.REMOTE_DIR }}\";
+            export NPM_CONFIG_FUND=false;
+            npm ci --omit=dev;
+            pm2 describe inventory-picker-socket >/dev/null 2>&1
+              && pm2 reload inventory-picker-socket --update-env
+              || pm2 start index.js --name inventory-picker-socket;
+            pm2 save'"
