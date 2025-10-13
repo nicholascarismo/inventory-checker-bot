@@ -365,31 +365,25 @@ app.command('/stock', async ({ ack, body, client }) => {
    View: pick type -> show car picker
 ========================= */
 app.view('stock_pick_type', async ({ ack, body, view, client }) => {
+  await ack();
+
   const md = JSON.parse(view.private_metadata || '{}');
   const channel = md.channel;
   const type = view.state.values?.type_block?.ptype_select?.selected_option?.value;
-
   if (!type) {
-    // Inline error example (optional):
-    await ack({
-      response_action: 'errors',
-      errors: { type_block: 'Please choose a product type.' }
-    });
+    await client.chat.postMessage({ channel, text: 'No type selected.' });
     return;
   }
 
   const carsSet = skuIndex.carsByType.get(type) || new Set();
   const carOptions = optionsFromSet(carsSet);
   if (!carOptions.length) {
-    // Close modal and notify channel (no next modal possible)
-    await ack();
     await client.chat.postMessage({ channel, text: `No cars found for type *${type}*.` });
     return;
   }
 
-  // PUSH the next modal in the ack (do not call views.open here)
-  await ack({
-    response_action: 'push',
+  await client.views.open({
+    trigger_id: body.trigger_id,
     view: {
       type: 'modal',
       callback_id: 'stock_pick_car',
@@ -418,23 +412,22 @@ app.view('stock_pick_type', async ({ ack, body, view, client }) => {
 /* =========================
    View: pick car -> show SORT picker (3rd step)
 ========================= */
-app.view('stock_pick_car', async ({ ack, body, view }) => {
+app.view('stock_pick_car', async ({ ack, body, view, client }) => {
+  await ack();
+
   const md = JSON.parse(view.private_metadata || '{}');
   const channel = md.channel;
   const type = md.type;
   const car = view.state.values?.car_block?.car_select?.selected_option?.value;
 
   if (!type || !car) {
-    await ack({
-      response_action: 'errors',
-      errors: { car_block: 'Please choose a car.' }
-    });
+    await client.chat.postMessage({ channel, text: 'Selection missing.' });
     return;
   }
 
-  // PUSH the next modal in the ack
-  await ack({
-    response_action: 'push',
+  // Open final modal to choose sort order
+  await client.views.open({
+    trigger_id: body.trigger_id,
     view: {
       type: 'modal',
       callback_id: 'stock_pick_sort',
@@ -466,7 +459,9 @@ app.view('stock_pick_car', async ({ ack, body, view }) => {
 /* =========================
    View: sort choice -> ask include OOS? (new 4th step)
 ========================= */
-app.view('stock_pick_sort', async ({ ack, view }) => {
+app.view('stock_pick_sort', async ({ ack, body, view, client }) => {
+  await ack();
+
   const md = JSON.parse(view.private_metadata || '{}');
   const channel = md.channel;
   const type = md.type;
@@ -474,9 +469,9 @@ app.view('stock_pick_sort', async ({ ack, view }) => {
 
   const choice = view.state.values?.sort_block?.sort_choice?.selected_option?.value || 'qtydesc';
 
-  // PUSH the final "include OOS?" modal in the ack
-  await ack({
-    response_action: 'push',
+  // Open the new "include OOS?" modal
+  await client.views.open({
+    trigger_id: body.trigger_id,
     view: {
       type: 'modal',
       callback_id: 'stock_pick_oos',
