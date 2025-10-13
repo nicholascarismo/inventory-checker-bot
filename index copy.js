@@ -320,7 +320,7 @@ function buildBlocksOneMessage({ type, car, variants, headerLabel = 'In-Stock' }
 }
 
 /* =========================
-   Slash: /stock  (Single-modal)
+   Slash: /stock
 ========================= */
 app.command('/stock', async ({ ack, body, client }) => {
   await ack();
@@ -330,7 +330,7 @@ app.command('/stock', async ({ ack, body, client }) => {
     await client.chat.postEphemeral({
       channel: body.channel_id,
       user: body.user_id,
-      text: 'Index is building or empty. Try /stock-refresh. If it stays empty, check logs for errors.'
+      text: 'Index is building or empty. Try /stock-refresh. If it stays empty, check Render logs for ❗ errors.'
     });
     return;
   }
@@ -339,13 +339,11 @@ app.command('/stock', async ({ ack, body, client }) => {
     trigger_id: body.trigger_id,
     view: {
       type: 'modal',
-      callback_id: 'stock_picker_submit',
+      callback_id: 'stock_pick_type',
       title: { type: 'plain_text', text: 'Inventory Picker' },
-      submit: { type: 'plain_text', text: 'Show Results' },
+      submit: { type: 'plain_text', text: 'Next' },
       close: { type: 'plain_text', text: 'Cancel' },
-      private_metadata: JSON.stringify({ channel: body.channel_id }),
       blocks: [
-        // TYPE (static_select)
         {
           type: 'input',
           block_id: 'type_block',
@@ -356,22 +354,88 @@ app.command('/stock', async ({ ack, body, client }) => {
             options: typeOptions,
             placeholder: { type: 'plain_text', text: 'e.g., STEERINGWHEEL' }
           }
-        },
+        }
+      ],
+      private_metadata: JSON.stringify({ channel: body.channel_id })
+    }
+  });
+});
 
-        // CAR (external_select) — options are provided dynamically by app.options('car_select')
+/* =========================
+   View: pick type -> show car picker
+========================= */
+app.view('stock_pick_type', async ({ ack, body, view, client }) => {
+  await ack();
+
+  const md = JSON.parse(view.private_metadata || '{}');
+  const channel = md.channel;
+  const type = view.state.values?.type_block?.ptype_select?.selected_option?.value;
+  if (!type) {
+    await client.chat.postMessage({ channel, text: 'No type selected.' });
+    return;
+  }
+
+  const carsSet = skuIndex.carsByType.get(type) || new Set();
+  const carOptions = optionsFromSet(carsSet);
+  if (!carOptions.length) {
+    await client.chat.postMessage({ channel, text: `No cars found for type *${type}*.` });
+    return;
+  }
+
+  await client.views.open({
+    trigger_id: body.trigger_id,
+    view: {
+      type: 'modal',
+      callback_id: 'stock_pick_car',
+      title: { type: 'plain_text', text: 'Inventory Picker' },
+      submit: { type: 'plain_text', text: 'Next' },
+      close: { type: 'plain_text', text: 'Cancel' },
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `*Type:* ${type}` } },
         {
           type: 'input',
           block_id: 'car_block',
           label: { type: 'plain_text', text: 'Choose a Car' },
           element: {
-            type: 'external_select',
+            type: 'static_select',
             action_id: 'car_select',
-            min_query_length: 0,
-            placeholder: { type: 'plain_text', text: 'Start typing or click to load…' }
+            options: carOptions,
+            placeholder: { type: 'plain_text', text: 'e.g., BMWG30' }
           }
-        },
+        }
+      ],
+      private_metadata: JSON.stringify({ channel, type })
+    }
+  });
+});
 
-        // SORT (radio)
+/* =========================
+   View: pick car -> show SORT picker (3rd step)
+========================= */
+app.view('stock_pick_car', async ({ ack, body, view, client }) => {
+  await ack();
+
+  const md = JSON.parse(view.private_metadata || '{}');
+  const channel = md.channel;
+  const type = md.type;
+  const car = view.state.values?.car_block?.car_select?.selected_option?.value;
+
+  if (!type || !car) {
+    await client.chat.postMessage({ channel, text: 'Selection missing.' });
+    return;
+  }
+
+  // Open final modal to choose sort order
+  await client.views.open({
+    trigger_id: body.trigger_id,
+    view: {
+      type: 'modal',
+      callback_id: 'stock_pick_sort',
+      title: { type: 'plain_text', text: 'Inventory Picker' },
+      submit: { type: 'plain_text', text: 'Next' },
+      close: { type: 'plain_text', text: 'Cancel' },
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `*Type:* ${type} • *Car:* ${car}` } },
         {
           type: 'input',
           block_id: 'sort_block',
@@ -385,9 +449,38 @@ app.command('/stock', async ({ ack, body, client }) => {
             ],
             initial_option: { text: { type: 'plain_text', text: 'Quantity (High → Low)' }, value: 'qtydesc' }
           }
-        },
+        }
+      ],
+      private_metadata: JSON.stringify({ channel, type, car })
+    }
+  });
+});
 
-        // Include OOS? (radio)
+/* =========================
+   View: sort choice -> ask include OOS? (new 4th step)
+========================= */
+app.view('stock_pick_sort', async ({ ack, body, view, client }) => {
+  await ack();
+
+  const md = JSON.parse(view.private_metadata || '{}');
+  const channel = md.channel;
+  const type = md.type;
+  const car = md.car;
+
+  const choice = view.state.values?.sort_block?.sort_choice?.selected_option?.value || 'qtydesc';
+
+  // Open the new "include OOS?" modal
+  await client.views.open({
+    trigger_id: body.trigger_id,
+    view: {
+      type: 'modal',
+      callback_id: 'stock_pick_oos',
+      title: { type: 'plain_text', text: 'Inventory Picker' },
+      submit: { type: 'plain_text', text: 'Show Results' },
+      close: { type: 'plain_text', text: 'Cancel' },
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `*Type:* ${type} • *Car:* ${car}` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `*Sort:* ${choice === 'alpha' ? 'Alphabetical (A→Z)' : 'Quantity (High → Low)'}` } },
         {
           type: 'input',
           block_id: 'oos_block',
@@ -402,79 +495,37 @@ app.command('/stock', async ({ ack, body, client }) => {
             initial_option: { text: { type: 'plain_text', text: 'Only show in-stock SKUs' }, value: 'in_only' }
           }
         }
-      ]
+      ],
+      private_metadata: JSON.stringify({ channel, type, car, choice })
     }
   });
 });
 
 /* =========================
-   Options loader: car_select (external_select)
-   Populates cars based on the currently selected Type in the view state
+   View: include OOS? -> post results
 ========================= */
-app.options('car_select', async ({ options, ack, payload }) => {
-  try {
-    // Try to read the selected TYPE from the current view state
-    const type =
-      payload?.view?.state?.values?.type_block?.ptype_select?.selected_option?.value;
+app.view('stock_pick_oos', async ({ ack, body, view, client }) => {
+  await ack();
 
-    let cars = [];
-    if (type) {
-      const carsSet = skuIndex.carsByType.get(type) || new Set();
-      cars = [...carsSet].sort();
-    }
-
-    // Build up to 100 options that Slack expects for external_select
-    const out = cars.slice(0, 100).map(c => ({
-      text: { type: 'plain_text', text: c, emoji: true },
-      value: c
-    }));
-
-    // If type not picked yet (out empty), you can still return empty to force user to pick type first.
-    await ack({ options: out });
-  } catch (e) {
-    // On error, return empty list to avoid Slack errors
-    await ack({ options: [] });
-  }
-});
-
-/* =========================
-   View submit: stock_picker_submit -> post results
-========================= */
-app.view('stock_picker_submit', async ({ ack, body, view, client }) => {
-  // Validate required fields
-  const errors = {};
-  const type = view.state.values?.type_block?.ptype_select?.selected_option?.value;
-  const car  = view.state.values?.car_block?.car_select?.selected_option?.value;
-  const sortChoice =
-    view.state.values?.sort_block?.sort_choice?.selected_option?.value || 'qtydesc';
-  const includeOpt =
-    view.state.values?.oos_block?.oos_choice?.selected_option?.value || 'in_only';
-
-  if (!type) errors['type_block'] = 'Please choose a Product Type.';
-  if (!car)  errors['car_block']  = 'Please choose a Car.';
-
-  if (Object.keys(errors).length) {
-    await ack({ response_action: 'errors', errors });
-    return;
-  }
-
-  await ack(); // close modal
-
-  // Where to post
   const md = JSON.parse(view.private_metadata || '{}');
   const channel = md.channel;
+  const type = md.type;
+  const car = md.car;
+  const choice = md.choice || 'qtydesc';
+
+  const includeOpt = view.state.values?.oos_block?.oos_choice?.selected_option?.value || 'in_only';
 
   const key = `${type}::${car}`;
   const inStock = skuIndex.inStockByTypeCar.get(key) || [];
   const oosList = skuIndex.outOfStockByTypeCar.get(key) || [];
 
-  const choice = sortChoice === 'alpha' ? 'alpha' : 'qtydesc';
-
   if (includeOpt === 'in_only') {
+    // Preserve ORIGINAL behavior exactly
     if (!inStock.length) {
       await client.chat.postMessage({ channel, text: `No in-stock variants for *${type}* / *${car}*.` });
       return;
     }
+
     let variants = dedupeBySku(inStock);
     variants = choice === 'alpha' ? sortBySuffixAsc(variants) : sortByQtyDesc(variants);
     const blocks = buildBlocksOneMessage({ type, car, variants, headerLabel: 'In-Stock' });
@@ -482,17 +533,17 @@ app.view('stock_picker_submit', async ({ ack, body, view, client }) => {
     return;
   }
 
-  // with_oos
+  // with_oos: combine in-stock + OOS (OOS excludes "Z Internal" by index construction)
   let combined = dedupeBySku([ ...(inStock || []), ...(oosList || []) ]);
   if (!combined.length) {
     await client.chat.postMessage({ channel, text: `No variants (in-stock or out-of-stock) for *${type}* / *${car}*.` });
     return;
   }
+
   combined = choice === 'alpha' ? sortBySuffixAsc(combined) : sortByQtyDesc(combined);
   const blocks = buildBlocksOneMessage({ type, car, variants: combined, headerLabel: 'In-Stock + OOS' });
   await client.chat.postMessage({ channel, text: `${type}/${car} variants (in-stock + OOS)`, blocks });
 });
-
 
 /* =========================
    Slash: /stock-refresh (ASYNC)
