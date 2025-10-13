@@ -347,16 +347,17 @@ app.command('/stock', async ({ ack, body, client }) => {
       blocks: [
   // TYPE (static_select)
   {
-    type: 'input',
-    block_id: 'type_block',
-    label: { type: 'plain_text', text: 'Choose a Product Type' },
-    element: {
-      type: 'static_select',
-      action_id: 'ptype_select', // we'll listen to this to update the car list
-      options: typeOptions,
-      placeholder: { type: 'plain_text', text: 'e.g., STEERINGWHEEL' }
-    }
-  },
+  type: 'input',
+  block_id: 'type_block',
+  dispatch_action: true, // ✅ tell Slack to send a block_actions payload on change
+  label: { type: 'plain_text', text: 'Choose a Product Type' },
+  element: {
+    type: 'static_select',
+    action_id: 'ptype_select',
+    options: typeOptions,
+    placeholder: { type: 'plain_text', text: 'e.g., STEERINGWHEEL' }
+  }
+},
 
   // CAR (static_select) — starts with a "pick type first" placeholder
   {
