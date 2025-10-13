@@ -1,0 +1,52 @@
+name: Deploy to VPS (inventory-picker-socket)
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Add SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Trust VPS host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DROPLET_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Rsync code to VPS
+        run: |
+          rsync -avz --delete \
+            --exclude ".git" \
+            --exclude "node_modules" \
+            ./ "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/"
+
+      - name: Install deps & reload PM2 on VPS
+        run: |
+          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" bash -lc '
+            set -e
+            cd "${REMOTE_DIR:?not set}"
+            # Ensure shared env is available in non-interactive shell
+            set -a; [ -f "$HOME/.shared_env" ] && . "$HOME/.shared_env"; set +a
+
+            # Install production deps
+            npm ci --omit=dev
+
+            # First start if not exists, else reload
+            if ! pm2 describe inventory-picker-socket >/dev/null 2>&1; then
+              chmod +x ./start.sh || true
+              pm2 start ./start.sh --name inventory-picker-socket
+            else
+              pm2 reload inventory-picker-socket
+            fi
+            pm2 save
+          '
+        env:
+          REMOTE_DIR: ${{ secrets.REMOTE_DIR }}
