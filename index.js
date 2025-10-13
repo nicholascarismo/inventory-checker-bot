@@ -345,96 +345,181 @@ app.command('/stock', async ({ ack, body, client }) => {
       close: { type: 'plain_text', text: 'Cancel' },
       private_metadata: JSON.stringify({ channel: body.channel_id }),
       blocks: [
-        // TYPE (static_select)
-        {
-          type: 'input',
-          block_id: 'type_block',
-          label: { type: 'plain_text', text: 'Choose a Product Type' },
-          element: {
-            type: 'static_select',
-            action_id: 'ptype_select',
-            options: typeOptions,
-            placeholder: { type: 'plain_text', text: 'e.g., STEERINGWHEEL' }
-          }
-        },
+  // TYPE (static_select)
+  {
+    type: 'input',
+    block_id: 'type_block',
+    label: { type: 'plain_text', text: 'Choose a Product Type' },
+    element: {
+      type: 'static_select',
+      action_id: 'ptype_select', // we'll listen to this to update the car list
+      options: typeOptions,
+      placeholder: { type: 'plain_text', text: 'e.g., STEERINGWHEEL' }
+    }
+  },
 
-        // CAR (external_select) — options are provided dynamically by app.options('car_select')
+  // CAR (static_select) — starts with a "pick type first" placeholder
+  {
+    type: 'input',
+    block_id: 'car_block',
+    label: { type: 'plain_text', text: 'Choose a Car' },
+    element: {
+      type: 'static_select',
+      action_id: 'car_select',
+      options: [
         {
-          type: 'input',
-          block_id: 'car_block',
-          label: { type: 'plain_text', text: 'Choose a Car' },
-          element: {
-            type: 'external_select',
-            action_id: 'car_select',
-            min_query_length: 0,
-            placeholder: { type: 'plain_text', text: 'Start typing or click to load…' }
-          }
-        },
-
-        // SORT (radio)
-        {
-          type: 'input',
-          block_id: 'sort_block',
-          label: { type: 'plain_text', text: 'Display order' },
-          element: {
-            type: 'radio_buttons',
-            action_id: 'sort_choice',
-            options: [
-              { text: { type: 'plain_text', text: 'Alphabetical (A→Z)' }, value: 'alpha' },
-              { text: { type: 'plain_text', text: 'Quantity (High → Low)' }, value: 'qtydesc' }
-            ],
-            initial_option: { text: { type: 'plain_text', text: 'Quantity (High → Low)' }, value: 'qtydesc' }
-          }
-        },
-
-        // Include OOS? (radio)
-        {
-          type: 'input',
-          block_id: 'oos_block',
-          label: { type: 'plain_text', text: 'Show only in-stock? Or also include out-of-stock?' },
-          element: {
-            type: 'radio_buttons',
-            action_id: 'oos_choice',
-            options: [
-              { text: { type: 'plain_text', text: 'Only show in-stock SKUs' }, value: 'in_only' },
-              { text: { type: 'plain_text', text: 'Show in-stock AND out-of-stock SKUs' }, value: 'with_oos' }
-            ],
-            initial_option: { text: { type: 'plain_text', text: 'Only show in-stock SKUs' }, value: 'in_only' }
-          }
+          text: { type: 'plain_text', text: '— Pick a Type first —' },
+          value: '__disabled__'
         }
-      ]
+      ],
+      initial_option: {
+        text: { type: 'plain_text', text: '— Pick a Type first —' },
+        value: '__disabled__'
+      }
+    }
+  },
+
+  // SORT (radio)
+  {
+    type: 'input',
+    block_id: 'sort_block',
+    label: { type: 'plain_text', text: 'Display order' },
+    element: {
+      type: 'radio_buttons',
+      action_id: 'sort_choice',
+      options: [
+        { text: { type: 'plain_text', text: 'Alphabetical (A→Z)' }, value: 'alpha' },
+        { text: { type: 'plain_text', text: 'Quantity (High → Low)' }, value: 'qtydesc' }
+      ],
+      initial_option: { text: { type: 'plain_text', text: 'Quantity (High → Low)' }, value: 'qtydesc' }
+    }
+  },
+
+  // Include OOS? (radio)
+  {
+    type: 'input',
+    block_id: 'oos_block',
+    label: { type: 'plain_text', text: 'Show only in-stock? Or also include out-of-stock?' },
+    element: {
+      type: 'radio_buttons',
+      action_id: 'oos_choice',
+      options: [
+        { text: { type: 'plain_text', text: 'Only show in-stock SKUs' }, value: 'in_only' },
+        { text: { type: 'plain_text', text: 'Show in-stock AND out-of-stock SKUs' }, value: 'with_oos' }
+      ],
+      initial_option: { text: { type: 'plain_text', text: 'Only show in-stock SKUs' }, value: 'in_only' }
+    }
+  }
+]
     }
   });
 });
 
 /* =========================
-   Options loader: car_select (external_select)
-   Populates cars based on the currently selected Type in the view state
+   Action: when Type changes, rebuild the Car options and update the modal
 ========================= */
-app.options('car_select', async ({ options, ack, payload }) => {
-  try {
-    // Try to read the selected TYPE from the current view state
-    const type =
-      payload?.view?.state?.values?.type_block?.ptype_select?.selected_option?.value;
+app.action('ptype_select', async ({ ack, body, client }) => {
+  await ack();
 
-    let cars = [];
-    if (type) {
-      const carsSet = skuIndex.carsByType.get(type) || new Set();
-      cars = [...carsSet].sort();
-    }
+  // 1) what Type did they select?
+  const selectedType = body.actions?.[0]?.selected_option?.value;
 
-    // Build up to 100 options that Slack expects for external_select
-    const out = cars.slice(0, 100).map(c => ({
-      text: { type: 'plain_text', text: c, emoji: true },
-      value: c
-    }));
+  // 2) build fresh Type and Car options
+  const typeOptions = optionsFromTypesWithPriority(skuIndex.types);
+  const typeInitial = typeOptions.find(o => o.value === selectedType) || typeOptions[0];
 
-    // If type not picked yet (out empty), you can still return empty to force user to pick type first.
-    await ack({ options: out });
-  } catch (e) {
-    // On error, return empty list to avoid Slack errors
-    await ack({ options: [] });
-  }
+  const carsSet = skuIndex.carsByType.get(selectedType) || new Set();
+  const carOptions = optionsFromSet(carsSet);
+
+  // 3) rebuild the same view with updated Car list
+  const newView = {
+    type: 'modal',
+    callback_id: 'stock_picker_submit',
+    title: { type: 'plain_text', text: 'Inventory Picker' },
+    submit: { type: 'plain_text', text: 'Show Results' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    private_metadata: body.view.private_metadata,
+    blocks: [
+      // TYPE (keep selection)
+      {
+        type: 'input',
+        block_id: 'type_block',
+        label: { type: 'plain_text', text: 'Choose a Product Type' },
+        element: {
+          type: 'static_select',
+          action_id: 'ptype_select',
+          options: typeOptions,
+          initial_option: typeInitial,
+          placeholder: { type: 'plain_text', text: 'e.g., STEERINGWHEEL' }
+        }
+      },
+
+      // CAR (now with actual options for the chosen Type)
+      {
+        type: 'input',
+        block_id: 'car_block',
+        label: { type: 'plain_text', text: 'Choose a Car' },
+        element: {
+          type: 'static_select',
+          action_id: 'car_select',
+          options: carOptions.length
+            ? carOptions
+            : [
+                {
+                  text: { type: 'plain_text', text: '— No cars for this Type —' },
+                  value: '__disabled__'
+                }
+              ],
+          initial_option: carOptions.length
+            ? undefined
+            : {
+                text: { type: 'plain_text', text: '— No cars for this Type —' },
+                value: '__disabled__'
+              },
+          placeholder: { type: 'plain_text', text: carOptions.length ? 'Pick a car…' : 'No cars found' }
+        }
+      },
+
+      // SORT (preserve defaults)
+      {
+        type: 'input',
+        block_id: 'sort_block',
+        label: { type: 'plain_text', text: 'Display order' },
+        element: {
+          type: 'radio_buttons',
+          action_id: 'sort_choice',
+          options: [
+            { text: { type: 'plain_text', text: 'Alphabetical (A→Z)' }, value: 'alpha' },
+            { text: { type: 'plain_text', text: 'Quantity (High → Low)' }, value: 'qtydesc' }
+          ],
+          initial_option: { text: { type: 'plain_text', text: 'Quantity (High → Low)' }, value: 'qtydesc' }
+        }
+      },
+
+      // Include OOS? (preserve defaults)
+      {
+        type: 'input',
+        block_id: 'oos_block',
+        label: { type: 'plain_text', text: 'Show only in-stock? Or also include out-of-stock?' },
+        element: {
+          type: 'radio_buttons',
+          action_id: 'oos_choice',
+          options: [
+            { text: { type: 'plain_text', text: 'Only show in-stock SKUs' }, value: 'in_only' },
+            { text: { type: 'plain_text', text: 'Show in-stock AND out-of-stock SKUs' }, value: 'with_oos' }
+          ],
+          initial_option: { text: { type: 'plain_text', text: 'Only show in-stock SKUs' }, value: 'in_only' }
+        }
+      }
+    ]
+  };
+
+  // 4) push the updated view (replace the current modal)
+  await client.views.update({
+    view_id: body.view.id,
+    hash: body.view.hash,       // prevents race conditions
+    view: newView
+  });
 });
 
 /* =========================
@@ -452,6 +537,13 @@ app.view('stock_picker_submit', async ({ ack, body, view, client }) => {
 
   if (!type) errors['type_block'] = 'Please choose a Product Type.';
   if (!car)  errors['car_block']  = 'Please choose a Car.';
+
+const car  = view.state.values?.car_block?.car_select?.selected_option?.value;
+
+// reject placeholder
+if (car === '__disabled__') {
+  errors['car_block'] = 'Please pick a Car.';
+}
 
   if (Object.keys(errors).length) {
     await ack({ response_action: 'errors', errors });
