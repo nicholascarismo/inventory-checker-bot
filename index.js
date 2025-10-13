@@ -361,23 +361,15 @@ app.command('/stock', async ({ ack, body, client }) => {
 
   // CAR (static_select) — starts with a "pick type first" placeholder
   {
-    type: 'input',
-    block_id: 'car_block',
-    label: { type: 'plain_text', text: 'Choose a Car' },
-    element: {
-      type: 'static_select',
-      action_id: 'car_select',
-      options: [
-        {
-          text: { type: 'plain_text', text: '— Pick a Type first —' },
-          value: '__disabled__'
-        }
-      ],
-      initial_option: {
-        text: { type: 'plain_text', text: '— Pick a Type first —' },
-        value: '__disabled__'
-      }
-    }
+  type: 'input',
+  block_id: 'car_block',
+  label: { type: 'plain_text', text: 'Choose a Car' },
+  element: {
+    type: 'external_select',
+    action_id: 'car_select',
+    min_query_length: 0, // ← important: load options even without typing
+    placeholder: { type: 'plain_text', text: 'Pick a type first…' }
+  }
   },
 
   // SORT (radio)
@@ -416,6 +408,31 @@ app.command('/stock', async ({ ack, body, client }) => {
   });
 });
 
+
+app.options('car_select', async ({ ack, payload }) => {
+  try {
+    // Robustly read the currently selected TYPE from the live view state
+    const type =
+      payload?.view?.state?.values?.type_block?.ptype_select?.selected_option?.value;
+
+    let carOptions = [];
+    if (type) {
+      const carsSet = skuIndex.carsByType.get(type) || new Set();
+      const cars = [...carsSet].sort().slice(0, 100);
+      carOptions = cars.map(c => ({
+        text: { type: 'plain_text', text: c, emoji: true },
+        value: c,
+      }));
+    }
+
+    // If no type yet, return empty (Slack shows the placeholder)
+    await ack({ options: carOptions });
+  } catch (err) {
+    console.error('car_select options error:', err);
+    await ack({ options: [] });
+  }
+});
+
 /* =========================
    Action: when Type changes, rebuild the Car options and update the modal
 ========================= */
@@ -445,6 +462,7 @@ app.action('ptype_select', async ({ ack, body, client }) => {
       {
         type: 'input',
         block_id: 'type_block',
+dispatch_action: true, // ✅ tell Slack to send a block_actions payload on change
         label: { type: 'plain_text', text: 'Choose a Product Type' },
         element: {
           type: 'static_select',
@@ -457,29 +475,16 @@ app.action('ptype_select', async ({ ack, body, client }) => {
 
       // CAR (now with actual options for the chosen Type)
       {
-        type: 'input',
-        block_id: 'car_block',
-        label: { type: 'plain_text', text: 'Choose a Car' },
-        element: {
-          type: 'static_select',
-          action_id: 'car_select',
-          options: carOptions.length
-            ? carOptions
-            : [
-                {
-                  text: { type: 'plain_text', text: '— No cars for this Type —' },
-                  value: '__disabled__'
-                }
-              ],
-          initial_option: carOptions.length
-            ? undefined
-            : {
-                text: { type: 'plain_text', text: '— No cars for this Type —' },
-                value: '__disabled__'
-              },
-          placeholder: { type: 'plain_text', text: carOptions.length ? 'Pick a car…' : 'No cars found' }
-        }
-      },
+  type: 'input',
+  block_id: 'car_block',
+  label: { type: 'plain_text', text: 'Choose a Car' },
+  element: {
+    type: 'external_select',
+    action_id: 'car_select',
+    min_query_length: 0, // ← important: load options even without typing
+    placeholder: { type: 'plain_text', text: 'Pick a type first…' }
+  }
+},
 
       // SORT (preserve defaults)
       {
@@ -540,10 +545,6 @@ app.view('stock_picker_submit', async ({ ack, body, view, client }) => {
   if (!car)  errors['car_block']  = 'Please choose a Car.';
 
 
-// reject placeholder
-if (car === '__disabled__') {
-  errors['car_block'] = 'Please pick a Car.';
-}
 
   if (Object.keys(errors).length) {
     await ack({ response_action: 'errors', errors });
