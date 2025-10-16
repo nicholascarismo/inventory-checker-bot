@@ -52,16 +52,19 @@ jobs:
           APP_NAME="${{ secrets.APP_NAME }}"
           APP_DIR="${APP_DIR%/}"
 
-          [ -f ~/.profile ] && . ~/.profile || true
-          [ -f ~/.bashrc ] && . ~/.bashrc || true
-          [ -f ~/.nvm/nvm.sh ] && . ~/.nvm/nvm.sh || true
+          # make PATH sane
+          if [ -f ~/.profile ]; then . ~/.profile; fi
+          if [ -f ~/.bashrc ]; then . ~/.bashrc; fi
+          if [ -f ~/.nvm/nvm.sh ]; then . ~/.nvm/nvm.sh; fi
 
           if [ -z "$APP_DIR" ] || [ ! -d "$APP_DIR" ]; then
             echo "❌ APP_DIR not set or missing: $APP_DIR" >&2; exit 2; fi
           if [ -z "$APP_NAME" ]; then APP_NAME="$(basename "$APP_DIR")"; fi
           if [ -z "$APP_NAME" ]; then echo "❌ APP_NAME empty"; exit 3; fi
 
-          echo "APP_DIR=$APP_DIR"; echo "APP_NAME=$APP_NAME"; ls -la "$APP_DIR" || true
+          echo "APP_DIR=$APP_DIR"
+          echo "APP_NAME=$APP_NAME"
+          ls -la "$APP_DIR"
 
           if [ ! -f "$APP_DIR/.env" ]; then
             echo "❌ .env not found in $APP_DIR"; exit 4; fi
@@ -70,36 +73,31 @@ jobs:
           export NPM_CONFIG_FUND=false
           if [ ! -f package-lock.json ]; then npm install --package-lock-only; fi
 
-          # Robust npm CI: handle npm versions; avoid CRLF line-break surprises
-          if ! npm ci --omit=dev 2>/dev/null; then
-            npm ci --only=production 2>/dev/null || npm ci
-          fi
+          # npm ci (robust across npm versions; no pipes)
+          npm ci --omit=dev 2>/dev/null || npm ci --only=production 2>/dev/null || npm ci
 
-          # ---- PM2: locate or install, then use absolute path
+          # pm2: locate or install (no pipes)
           if ! command -v pm2 >/dev/null 2>&1; then
-            echo "pm2 not found; installing globally..."; npm i -g pm2 >/dev/null 2>&1 || npm i -g pm2
+            echo "pm2 not found; installing globally..."
+            npm i -g pm2 >/dev/null 2>&1 || npm i -g pm2
           fi
           PM2_PATH="$(command -v pm2 || true)"
           if [ -z "$PM2_PATH" ]; then
             echo "❌ pm2 not found after install"; exit 5; fi
           echo "Using PM2 at: $PM2_PATH"
 
-          # ---- Check if process exists WITHOUT a pipe in the test
+          # pm2 existence check WITHOUT pipelines
           TMP_PM2="/tmp/pm2_list.json"
-          if ! "$PM2_PATH" jlist >"$TMP_PM2" 2>/dev/null; then
-            echo "⚠️ pm2 jlist failed; proceeding to start"
-            "$PM2_PATH" start index.js --name "$APP_NAME" --cwd "$APP_DIR"
+          "$PM2_PATH" jlist >"$TMP_PM2" 2>/dev/null || echo "[]">$TMP_PM2
+          if grep -q "\"name\":\"$APP_NAME\"" "$TMP_PM2"; then
+            "$PM2_PATH" reload "$APP_NAME" --update-env
           else
-            if grep -q "\"name\":\"$APP_NAME\"" "$TMP_PM2"; then
-              "$PM2_PATH" reload "$APP_NAME" --update-env
-            else
-              "$PM2_PATH" start index.js --name "$APP_NAME" --cwd "$APP_DIR"
-            fi
+            "$PM2_PATH" start index.js --name "$APP_NAME" --cwd "$APP_DIR"
           fi
 
           "$PM2_PATH" save
           SCRIPT
-          # Normalize heredoc to LF so no CRLF splits lines
+          # normalize heredoc to LF (removes stray CR that can split tokens)
           sed -i "s/\r$//" /tmp/deploy_app.sh
           bash /tmp/deploy_app.sh
           '

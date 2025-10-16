@@ -1,2 +1,12 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+
+# Enforce LF (Unix) line endings for all YAML and shell scripts
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.sh   text eol=lf
+
+# Optionally also enforce LF for JS and JSON files
+*.js   text eol=lf
+*.json text eol=lf
