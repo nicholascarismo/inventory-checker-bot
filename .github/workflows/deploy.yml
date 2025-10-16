@@ -70,26 +70,36 @@ jobs:
           export NPM_CONFIG_FUND=false
           if [ ! -f package-lock.json ]; then npm install --package-lock-only; fi
 
-          # Robust npm CI: handle CRLF + npm versions
+          # Robust npm CI: handle npm versions; avoid CRLF line-break surprises
           if ! npm ci --omit=dev 2>/dev/null; then
-            # npm v6 fallback
             npm ci --only=production 2>/dev/null || npm ci
           fi
 
+          # ---- PM2: locate or install, then use absolute path
           if ! command -v pm2 >/dev/null 2>&1; then
-            echo "pm2 not found; installing globally..."; npm i -g pm2 >/dev/null 2>&1 || npm i -g pm2; fi
+            echo "pm2 not found; installing globally..."; npm i -g pm2 >/dev/null 2>&1 || npm i -g pm2
+          fi
           PM2_PATH="$(command -v pm2 || true)"
-          if [ -z "$PM2_PATH" ]; then echo "❌ pm2 not found after install"; exit 5; fi
+          if [ -z "$PM2_PATH" ]; then
+            echo "❌ pm2 not found after install"; exit 5; fi
           echo "Using PM2 at: $PM2_PATH"
 
-          if "$PM2_PATH" jlist | grep -q "\"name\":\"$APP_NAME\""; then
-            "$PM2_PATH" reload "$APP_NAME" --update-env
-          else
+          # ---- Check if process exists WITHOUT a pipe in the test
+          TMP_PM2="/tmp/pm2_list.json"
+          if ! "$PM2_PATH" jlist >"$TMP_PM2" 2>/dev/null; then
+            echo "⚠️ pm2 jlist failed; proceeding to start"
             "$PM2_PATH" start index.js --name "$APP_NAME" --cwd "$APP_DIR"
+          else
+            if grep -q "\"name\":\"$APP_NAME\"" "$TMP_PM2"; then
+              "$PM2_PATH" reload "$APP_NAME" --update-env
+            else
+              "$PM2_PATH" start index.js --name "$APP_NAME" --cwd "$APP_DIR"
+            fi
           fi
+
           "$PM2_PATH" save
           SCRIPT
-          # --- normalize heredoc to LF to avoid CRLF splitting lines ---
+          # Normalize heredoc to LF so no CRLF splits lines
           sed -i "s/\r$//" /tmp/deploy_app.sh
           bash /tmp/deploy_app.sh
           '
