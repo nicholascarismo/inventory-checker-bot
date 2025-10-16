@@ -46,39 +46,76 @@ jobs:
       - name: Install deps & (re)start with PM2
         run: |
           ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" bash -lc 'cat >/tmp/deploy_app.sh << "SCRIPT"
-          set -euo pipefail
+          set -eu
+
           APP_DIR="${{ secrets.REMOTE_DIR }}"
           APP_NAME="${{ secrets.APP_NAME }}"
+          # normalize path
           APP_DIR="${APP_DIR%/}"
 
-          if [ -f ~/.profile ]; then . ~/.profile; fi
-          if [ -f ~/.bashrc ]; then . ~/.bashrc; fi
-          if [ -f ~/.nvm/nvm.sh ]; then . ~/.nvm/nvm.sh; fi
+          # prepare PATH (no inline operators)
+          if [ -f "$HOME/.profile" ]; then . "$HOME/.profile"; fi
+          if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+          if [ -f "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi
 
-          if [ -z "$APP_DIR" ] || [ ! -d "$APP_DIR" ]; then echo "APP_DIR invalid: $APP_DIR" >&2; exit 2; fi
+          # sanity checks (one thing per line)
+          if [ -z "$APP_DIR" ]; then echo "APP_DIR empty"; exit 2; fi
+          if [ ! -d "$APP_DIR" ]; then echo "APP_DIR missing: $APP_DIR"; exit 2; fi
           if [ -z "$APP_NAME" ]; then APP_NAME="$(basename "$APP_DIR")"; fi
-          if [ -z "$APP_NAME" ]; then echo "APP_NAME empty" >&2; exit 3; fi
+          if [ -z "$APP_NAME" ]; then echo "APP_NAME empty"; exit 3; fi
 
           echo "APP_DIR=$APP_DIR"
           echo "APP_NAME=$APP_NAME"
           ls -la "$APP_DIR"
 
-          if [ ! -f "$APP_DIR/.env" ]; then echo ".env missing in $APP_DIR" >&2; exit 4; fi
+          # .env must exist (was uploaded earlier)
+          if [ ! -f "$APP_DIR/.env" ]; then echo ".env missing in $APP_DIR"; exit 4; fi
 
           cd "$APP_DIR"
           export NPM_CONFIG_FUND=false
-          if [ ! -f package-lock.json ]; then npm install --package-lock-only; fi
 
-          npm ci --omit=dev 2>/dev/null || npm ci --only=production 2>/dev/null || npm ci
+          if [ ! -f package-lock.json ]; then
+            npm install --package-lock-only
+          fi
 
-          if ! command -v pm2 >/dev/null 2>&1; then npm i -g pm2 >/dev/null 2>&1 || npm i -g pm2; fi
-          PM2_PATH="$(command -v pm2 || true)"
-          if [ -z "$PM2_PATH" ]; then echo "pm2 not found after install" >&2; exit 5; fi
+          # Robust npm ci without || chains
+          set +e
+          npm ci --omit=dev
+          NPM_STATUS=$?
+          if [ $NPM_STATUS -ne 0 ]; then
+            npm ci --only=production
+            NPM_STATUS=$?
+            if [ $NPM_STATUS -ne 0 ]; then
+              npm ci
+              NPM_STATUS=$?
+            fi
+          fi
+          set -e
+          if [ $NPM_STATUS -ne 0 ]; then echo "npm ci failed"; exit 6; fi
+
+          # Ensure pm2 exists
+          if ! command -v pm2 >/dev/null 2>&1; then
+            npm i -g pm2
+          fi
+          PM2_PATH="$(command -v pm2 || echo "")"
+          if [ -z "$PM2_PATH" ]; then echo "pm2 not found after install"; exit 5; fi
           echo "Using PM2 at: $PM2_PATH"
 
+          # PM2 existence check (no pipes inside conditions)
           TMP_PM2="/tmp/pm2_list.json"
-          if ! "$PM2_PATH" jlist >"$TMP_PM2" 2>/dev/null; then echo "[]">$TMP_PM2; fi
-          if grep -q "\"name\":\"$APP_NAME\"" "$TMP_PM2"; then
+          set +e
+          "$PM2_PATH" jlist > "$TMP_PM2" 2>/dev/null
+          JLIST_STATUS=$?
+          set -e
+          if [ $JLIST_STATUS -ne 0 ]; then echo "[]" > "$TMP_PM2"; fi
+
+          # grep, but tolerate missing match without failing the script
+          set +e
+          grep -q "\"name\":\"$APP_NAME\"" "$TMP_PM2"
+          GREP_STATUS=$?
+          set -e
+
+          if [ $GREP_STATUS -eq 0 ]; then
             "$PM2_PATH" reload "$APP_NAME" --update-env
           else
             "$PM2_PATH" start index.js --name "$APP_NAME" --cwd "$APP_DIR"
@@ -86,8 +123,7 @@ jobs:
 
           "$PM2_PATH" save
           SCRIPT
+          # normalize heredoc to LF so CRLF cannot split tokens or operators
           sed -i "s/\r$//" /tmp/deploy_app.sh
-          # Uncomment the next line once if you want to see the exact script with line numbers:
-          # nl -ba /tmp/deploy_app.sh | sed -n "1,200p"
           bash /tmp/deploy_app.sh
           '
