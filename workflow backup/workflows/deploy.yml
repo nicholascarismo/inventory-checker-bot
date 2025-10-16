@@ -1,0 +1,53 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start ssh-agent and add key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add droplet host key to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p 22 ${{ secrets.DROPLET_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Create .env from ENV_FILE secret (in workspace)
+        run: |
+          printf "%s" "${{ secrets.ENV_FILE }}" > .env
+
+      - name: Ensure remote directory exists
+        run: ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "mkdir -p '${{ secrets.REMOTE_DIR }}'"
+
+      - name: Rsync repo to droplet (keep .env)
+        run: |
+          rsync -az --delete \
+            --exclude 'node_modules' \
+            --exclude '.git' \
+            --exclude '.github' \
+            ./  "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/"
+
+      - name: Install deps & (re)start with PM2
+        run: >
+          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}"
+          "bash -lc 'set -euo pipefail;
+            source ~/.profile;
+            cd \"${{ secrets.REMOTE_DIR }}\";
+            export NPM_CONFIG_FUND=false;
+            npm ci --omit=dev;
+            if pm2 describe inventory-picker >/dev/null 2>&1; then
+              pm2 reload inventory-picker --update-env;
+            else
+              pm2 start index.js --name inventory-picker;
+            fi;
+            pm2 save'"

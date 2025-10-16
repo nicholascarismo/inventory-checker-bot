@@ -7,7 +7,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,34 +19,97 @@ jobs:
       - name: Add droplet host key to known_hosts
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -p 22 ${{ secrets.DROPLET_HOST }} >> ~/.ssh/known_hosts
-
-      - name: Create .env from ENV_FILE secret (in workspace)
-        run: |
-          printf "%s" "${{ secrets.ENV_FILE }}" > .env
+          ssh-keyscan -H -p 22 ${{ secrets.DROPLET_HOST }} >> ~/.ssh/known_hosts
 
       - name: Ensure remote directory exists
-        run: ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "mkdir -p '${{ secrets.REMOTE_DIR }}'"
+        run: ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "mkdir -p '${{ secrets.REMOTE_DIR }}' '${{ secrets.REMOTE_DIR }}/data'"
 
-      - name: Rsync repo to droplet (keep .env)
+      - name: Rsync repo to droplet (preserve server data/)
         run: |
           rsync -az --delete \
             --exclude 'node_modules' \
             --exclude '.git' \
             --exclude '.github' \
+            --exclude 'data/' \
             ./  "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/"
 
+      # Create a temp .env on the runner from the secret (NOT committed), then upload it
+      - name: Prepare .env from ENV_FILE (runner only)
+        run: |
+          printf "%s" "${{ secrets.ENV_FILE }}" > .env.deploy
+
+      - name: Upload .env to server
+        run: |
+          scp .env.deploy "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/.env"
+          rm -f .env.deploy
+
       - name: Install deps & (re)start with PM2
-        run: >
-          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}"
-          "bash -lc 'set -euo pipefail;
-            source ~/.profile;
-            cd \"${{ secrets.REMOTE_DIR }}\";
-            export NPM_CONFIG_FUND=false;
-            npm ci --omit=dev;
-            if pm2 describe inventory-picker >/dev/null 2>&1; then
-              pm2 reload inventory-picker --update-env;
-            else
-              pm2 start index.js --name inventory-picker;
-            fi;
-            pm2 save'"
+        run: |
+          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" bash -lc 'cat >/tmp/deploy_app.sh << "SCRIPT"
+          set -euo pipefail
+
+          # ---- Config from secrets ----
+          APP_DIR="${{ secrets.REMOTE_DIR }}"
+          APP_NAME="${{ secrets.APP_NAME }}"
+
+          # Normalize & sanity checks
+          APP_DIR="${APP_DIR%/}"   # strip trailing /
+          if [ -z "$APP_DIR" ] || [ ! -d "$APP_DIR" ]; then
+            echo "❌ APP_DIR not set or missing: $APP_DIR" >&2
+            exit 2
+          fi
+          if [ -z "$APP_NAME" ]; then
+            # Last-resort: use folder basename
+            APP_NAME="$(basename "$APP_DIR")"
+          fi
+          if [ -z "$APP_NAME" ]; then
+            echo "❌ APP_NAME is empty. Set repo secret APP_NAME." >&2
+            exit 3
+          fi
+
+          # Make PATH like a login shell (so npm/pm2 are visible)
+          [ -f ~/.profile ] && . ~/.profile || true
+          [ -f ~/.bashrc ] && . ~/.bashrc || true
+          [ -f ~/.nvm/nvm.sh ] && . ~/.nvm/nvm.sh || true
+
+          echo "APP_DIR=$APP_DIR"
+          echo "APP_NAME=$APP_NAME"
+          ls -la "$APP_DIR" || true
+
+          # Verify .env uploaded earlier
+          if [ ! -f "$APP_DIR/.env" ]; then
+            echo "❌ .env not found in $APP_DIR (ENV_FILE upload step failed?)" >&2
+            exit 4
+          fi
+
+          # Install production deps
+          cd "$APP_DIR"
+          export NPM_CONFIG_FUND=false
+          if [ ! -f package-lock.json ]; then
+            npm install --package-lock-only
+          fi
+          npm ci --omit=dev
+
+          # Locate or install pm2; use absolute path
+          if ! command -v pm2 >/dev/null 2>&1; then
+            echo "pm2 not found; installing globally..."
+            npm i -g pm2 >/dev/null 2>&1 || npm i -g pm2
+          fi
+          PM2_PATH="$(command -v pm2 || true)"
+          if [ -z "$PM2_PATH" ]; then
+            echo "❌ Could not locate pm2 after install" >&2
+            exit 5
+          fi
+          echo "Using PM2 at: $PM2_PATH"
+
+          # Start or reload with explicit cwd so the script path is correct
+          if "$PM2_PATH" list | grep -Eq "^[[:space:]]*$APP_NAME[[:space:]]"; then
+            "$PM2_PATH" reload "$APP_NAME" --update-env
+          else
+            "$PM2_PATH" start index.js --name "$APP_NAME" --cwd "$APP_DIR"
+          fi
+
+          "$PM2_PATH" save
+          SCRIPT
+          bash /tmp/deploy_app.sh
+          '
