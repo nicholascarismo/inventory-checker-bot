@@ -43,22 +43,21 @@ jobs:
           scp .env.deploy "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/.env"
           rm -f .env.deploy
 
-      - name: Install deps & (re)start with PM2
+      - name: Build deploy script on runner (LF only)
         run: |
-          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" bash -lc 'cat >/tmp/deploy_app.sh << "SCRIPT"
+          cat > /tmp/deploy_app.sh << 'SCRIPT'
           set -eu
 
           APP_DIR="${{ secrets.REMOTE_DIR }}"
           APP_NAME="${{ secrets.APP_NAME }}"
-          # normalize path
           APP_DIR="${APP_DIR%/}"
 
-          # prepare PATH (no inline operators)
+          # prepare PATH quietly
           if [ -f "$HOME/.profile" ]; then . "$HOME/.profile"; fi
           if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
           if [ -f "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi
 
-          # sanity checks (one thing per line)
+          # sanity
           if [ -z "$APP_DIR" ]; then echo "APP_DIR empty"; exit 2; fi
           if [ ! -d "$APP_DIR" ]; then echo "APP_DIR missing: $APP_DIR"; exit 2; fi
           if [ -z "$APP_NAME" ]; then APP_NAME="$(basename "$APP_DIR")"; fi
@@ -68,7 +67,7 @@ jobs:
           echo "APP_NAME=$APP_NAME"
           ls -la "$APP_DIR"
 
-          # .env must exist (was uploaded earlier)
+          # .env must exist
           if [ ! -f "$APP_DIR/.env" ]; then echo ".env missing in $APP_DIR"; exit 4; fi
 
           cd "$APP_DIR"
@@ -78,17 +77,18 @@ jobs:
             npm install --package-lock-only
           fi
 
-          # Robust npm ci without || chains
+          # Robust npm ci without pipes/||, with explicit exit checks
+          NPM_STATUS=0
           set +e
           npm ci --omit=dev
           NPM_STATUS=$?
           if [ $NPM_STATUS -ne 0 ]; then
             npm ci --only=production
             NPM_STATUS=$?
-            if [ $NPM_STATUS -ne 0 ]; then
-              npm ci
-              NPM_STATUS=$?
-            fi
+          fi
+          if [ $NPM_STATUS -ne 0 ]; then
+            npm ci
+            NPM_STATUS=$?
           fi
           set -e
           if [ $NPM_STATUS -ne 0 ]; then echo "npm ci failed"; exit 6; fi
@@ -101,15 +101,16 @@ jobs:
           if [ -z "$PM2_PATH" ]; then echo "pm2 not found after install"; exit 5; fi
           echo "Using PM2 at: $PM2_PATH"
 
-          # PM2 existence check (no pipes inside conditions)
+          # pm2 jlist -> file; grep without pipelines in conditions
           TMP_PM2="/tmp/pm2_list.json"
           set +e
           "$PM2_PATH" jlist > "$TMP_PM2" 2>/dev/null
           JLIST_STATUS=$?
           set -e
-          if [ $JLIST_STATUS -ne 0 ]; then echo "[]" > "$TMP_PM2"; fi
+          if [ $JLIST_STATUS -ne 0 ]; then
+            echo "[]" > "$TMP_PM2"
+          fi
 
-          # grep, but tolerate missing match without failing the script
           set +e
           grep -q "\"name\":\"$APP_NAME\"" "$TMP_PM2"
           GREP_STATUS=$?
@@ -123,7 +124,9 @@ jobs:
 
           "$PM2_PATH" save
           SCRIPT
-          # normalize heredoc to LF so CRLF cannot split tokens or operators
-          sed -i "s/\r$//" /tmp/deploy_app.sh
-          bash /tmp/deploy_app.sh
-          '
+          chmod +x /tmp/deploy_app.sh
+
+      - name: Upload & run deploy script on server
+        run: |
+          scp /tmp/deploy_app.sh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:/tmp/deploy_app.sh"
+          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "bash /tmp/deploy_app.sh"
