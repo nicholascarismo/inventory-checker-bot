@@ -28,3 +28,8 @@ coverage/
 .idea/
 EOF
 process.env
+
+# Force LF in workflows and shell scripts
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.sh   text eol=lf

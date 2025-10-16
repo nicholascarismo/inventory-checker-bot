@@ -48,68 +48,48 @@ jobs:
           ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" bash -lc 'cat >/tmp/deploy_app.sh << "SCRIPT"
           set -euo pipefail
 
-          # ---- Config from secrets ----
           APP_DIR="${{ secrets.REMOTE_DIR }}"
           APP_NAME="${{ secrets.APP_NAME }}"
+          APP_DIR="${APP_DIR%/}"
 
-          # Normalize & sanity checks
-          APP_DIR="${APP_DIR%/}"   # strip trailing /
-          if [ -z "$APP_DIR" ] || [ ! -d "$APP_DIR" ]; then
-            echo "❌ APP_DIR not set or missing: $APP_DIR" >&2
-            exit 2
-          fi
-          if [ -z "$APP_NAME" ]; then
-            # Last-resort: use folder basename
-            APP_NAME="$(basename "$APP_DIR")"
-          fi
-          if [ -z "$APP_NAME" ]; then
-            echo "❌ APP_NAME is empty. Set repo secret APP_NAME." >&2
-            exit 3
-          fi
-
-          # Make PATH like a login shell (so npm/pm2 are visible)
           [ -f ~/.profile ] && . ~/.profile || true
           [ -f ~/.bashrc ] && . ~/.bashrc || true
           [ -f ~/.nvm/nvm.sh ] && . ~/.nvm/nvm.sh || true
 
-          echo "APP_DIR=$APP_DIR"
-          echo "APP_NAME=$APP_NAME"
-          ls -la "$APP_DIR" || true
+          if [ -z "$APP_DIR" ] || [ ! -d "$APP_DIR" ]; then
+            echo "❌ APP_DIR not set or missing: $APP_DIR" >&2; exit 2; fi
+          if [ -z "$APP_NAME" ]; then APP_NAME="$(basename "$APP_DIR")"; fi
+          if [ -z "$APP_NAME" ]; then echo "❌ APP_NAME empty"; exit 3; fi
 
-          # Verify .env uploaded earlier
+          echo "APP_DIR=$APP_DIR"; echo "APP_NAME=$APP_NAME"; ls -la "$APP_DIR" || true
+
           if [ ! -f "$APP_DIR/.env" ]; then
-            echo "❌ .env not found in $APP_DIR (ENV_FILE upload step failed?)" >&2
-            exit 4
-          fi
+            echo "❌ .env not found in $APP_DIR"; exit 4; fi
 
-          # Install production deps
           cd "$APP_DIR"
           export NPM_CONFIG_FUND=false
-          if [ ! -f package-lock.json ]; then
-            npm install --package-lock-only
-          fi
-          npm ci --omit=dev
+          if [ ! -f package-lock.json ]; then npm install --package-lock-only; fi
 
-          # Locate or install pm2; use absolute path
+          # Robust npm CI: handle CRLF + npm versions
+          if ! npm ci --omit=dev 2>/dev/null; then
+            # npm v6 fallback
+            npm ci --only=production 2>/dev/null || npm ci
+          fi
+
           if ! command -v pm2 >/dev/null 2>&1; then
-            echo "pm2 not found; installing globally..."
-            npm i -g pm2 >/dev/null 2>&1 || npm i -g pm2
-          fi
+            echo "pm2 not found; installing globally..."; npm i -g pm2 >/dev/null 2>&1 || npm i -g pm2; fi
           PM2_PATH="$(command -v pm2 || true)"
-          if [ -z "$PM2_PATH" ]; then
-            echo "❌ Could not locate pm2 after install" >&2
-            exit 5
-          fi
+          if [ -z "$PM2_PATH" ]; then echo "❌ pm2 not found after install"; exit 5; fi
           echo "Using PM2 at: $PM2_PATH"
 
-          # Start or reload with explicit cwd so the script path is correct
-          if "$PM2_PATH" list | grep -Eq "^[[:space:]]*$APP_NAME[[:space:]]"; then
+          if "$PM2_PATH" jlist | grep -q "\"name\":\"$APP_NAME\""; then
             "$PM2_PATH" reload "$APP_NAME" --update-env
           else
             "$PM2_PATH" start index.js --name "$APP_NAME" --cwd "$APP_DIR"
           fi
-
           "$PM2_PATH" save
           SCRIPT
+          # --- normalize heredoc to LF to avoid CRLF splitting lines ---
+          sed -i "s/\r$//" /tmp/deploy_app.sh
           bash /tmp/deploy_app.sh
           '
