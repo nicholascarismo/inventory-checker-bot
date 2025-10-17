@@ -641,7 +641,12 @@ function startBackgroundRefresh() {
   await app.start();
   console.log(`✅ inventory-picker running on port ${port}`);
 
-  await sanityCheckShopify();
+  try {
+    await sanityCheckShopify();
+  } catch (e) {
+    console.error('⚠️ Post-start sanity check failed:', e?.message || e);
+    // do NOT throw; keep the bot running
+  }
 
   // Kick off periodic refreshes (use /stock-refresh for manual).
   startBackgroundRefresh();
