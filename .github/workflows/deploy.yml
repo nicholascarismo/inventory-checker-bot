@@ -43,49 +43,37 @@ jobs:
           scp .env.deploy "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/.env"
           rm -f .env.deploy
 
-      - name: Build minimal deploy script (LF only)
+      - name: Build minimal deploy script (no comments)
         run: |
           cat > /tmp/deploy_app.sh << 'SCRIPT'
           #!/usr/bin/env bash
           set -e
-
           APP_DIR="${{ secrets.REMOTE_DIR }}"
           APP_NAME="${{ secrets.APP_NAME }}"
           APP_DIR="${APP_DIR%/}"
-
           [ -n "$APP_DIR" ] || { echo "APP_DIR empty"; exit 2; }
           [ -d "$APP_DIR" ] || { echo "APP_DIR missing: $APP_DIR"; exit 2; }
           [ -n "$APP_NAME" ] || APP_NAME="$(basename "$APP_DIR")"
           [ -n "$APP_NAME" ] || { echo "APP_NAME empty"; exit 3; }
-
           cd "$APP_DIR"
           [ -f .env ] || { echo ".env missing in $APP_DIR"; exit 4; }
-
-          # show versions (helps debug)
           node -v || true
           npm -v || true
-
-          # deps: prefer ci if lockfile exists
           if [ -f package-lock.json ]; then
             npm ci || npm install --production || npm install
           else
             npm install --production || npm install
           fi
-
-          # pm2: ensure installed and get absolute path
           if ! command -v pm2 >/dev/null 2>&1; then
             npm i -g pm2
           fi
           PM2="$(command -v pm2 || echo "")"
           [ -n "$PM2" ] || { echo "pm2 not found after install"; exit 5; }
-
-          # idempotent: delete then start (avoids 'reload in progress')
           "$PM2" delete "$APP_NAME" || true
           "$PM2" start npm --name "$APP_NAME" --cwd "$APP_DIR" -- start
           "$PM2" save
           "$PM2" status "$APP_NAME" || true
           SCRIPT
-          # force LF and executable bit
           sed -i 's/\r$//' /tmp/deploy_app.sh
           chmod +x /tmp/deploy_app.sh
 
