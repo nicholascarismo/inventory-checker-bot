@@ -7,7 +7,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,7 +42,7 @@ jobs:
           scp .env.deploy "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/.env"
           rm -f .env.deploy
 
-      - name: Build minimal deploy script (no comments)
+      - name: Build tiny deploy script (LF only, no comments)
         run: |
           cat > /tmp/deploy_app.sh << 'SCRIPT'
           #!/usr/bin/env bash
@@ -59,26 +58,19 @@ jobs:
           [ -f .env ] || { echo ".env missing in $APP_DIR"; exit 4; }
           node -v || true
           npm -v || true
-          if [ -f package-lock.json ]; then
-            npm ci || npm install --production || npm install
-          else
-            npm install --production || npm install
-          fi
-          if ! command -v pm2 >/dev/null 2>&1; then
-            npm i -g pm2
-          fi
-          PM2="$(command -v pm2 || echo "")"
+          if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi
+          npm i -g pm2 || true
+          PM2="$(command -v pm2 || true)"
           [ -n "$PM2" ] || { echo "pm2 not found after install"; exit 5; }
           "$PM2" delete "$APP_NAME" || true
           "$PM2" start npm --name "$APP_NAME" --cwd "$APP_DIR" -- start
           "$PM2" save
           "$PM2" status "$APP_NAME" || true
           SCRIPT
-          # also remove CR locally for good measure
-          perl -pi -e 's/\r//g' /tmp/deploy_app.sh
+          sed -i 's/\r$//' /tmp/deploy_app.sh
           chmod +x /tmp/deploy_app.sh
 
-      - name: Upload & run deploy script on server (strip CR on server too)
+      - name: Run deploy script on server
         run: |
           scp /tmp/deploy_app.sh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:/tmp/deploy_app.sh"
-          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "tr -d '\r' < /tmp/deploy_app.sh > /tmp/deploy_app.lf.sh && chmod +x /tmp/deploy_app.lf.sh && bash /tmp/deploy_app.lf.sh"
+          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "bash /tmp/deploy_app.sh"
