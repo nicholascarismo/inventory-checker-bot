@@ -7,6 +7,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,7 +34,6 @@ jobs:
             --exclude 'data/' \
             ./  "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/"
 
-      # Create a temp .env on the runner from the secret (NOT committed), then upload it
       - name: Prepare .env from ENV_FILE (runner only)
         run: |
           printf "%s" "${{ secrets.ENV_FILE }}" > .env.deploy
@@ -43,37 +43,23 @@ jobs:
           scp .env.deploy "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/.env"
           rm -f .env.deploy
 
-      - name: Build deploy script on runner (LF only)
+      # Build the deployment script on the runner (LF line endings)
+      - name: Build deploy script on runner
         run: |
           cat > /tmp/deploy_app.sh << 'SCRIPT'
           set -eu
+
+          # ---------- Config from secrets ----------
           APP_DIR="${{ secrets.REMOTE_DIR }}"
           APP_NAME="${{ secrets.APP_NAME }}"
-          APP_DIR="${APP_DIR%/}"
+          APP_DIR="${APP_DIR%/}"   # strip trailing slash
 
-          # ----- Ensure shell has PATHs and Node 18+ via nvm -----
+          # ---------- Basic PATH init (no pipes/|| in conditionals) ----------
           if [ -f "$HOME/.profile" ]; then . "$HOME/.profile"; fi
           if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+          if [ -f "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi
 
-          if [ -f "$HOME/.nvm/nvm.sh" ]; then
-            . "$HOME/.nvm/nvm.sh"
-          else
-            # Optional install of nvm if it's missing (safe re-run)
-            curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-            . "$HOME/.nvm/nvm.sh"
-          fi
-
-          # Use the repo-pinned Node if available, else latest LTS 18
-          if [ -f ".nvmrc" ]; then
-            nvm install >/dev/null 2>&1 || true
-            nvm use >/dev/null 2>&1 || true
-          else
-            nvm install 18 >/dev/null 2>&1 || true
-            nvm use 18 >/dev/null 2>&1 || true
-          fi
-          echo "Node: $(node -v)   npm: $(npm -v)"
-
-          # ----- Sanity for paths and names -----
+          # ---------- Sanity checks ----------
           if [ -z "$APP_DIR" ]; then echo "APP_DIR empty"; exit 2; fi
           if [ ! -d "$APP_DIR" ]; then echo "APP_DIR missing: $APP_DIR"; exit 2; fi
           if [ -z "$APP_NAME" ]; then APP_NAME="$(basename "$APP_DIR")"; fi
@@ -83,18 +69,20 @@ jobs:
           echo "APP_NAME=$APP_NAME"
           ls -la "$APP_DIR"
 
-          # .env must exist (uploaded earlier step)
+          # ---------- .env must exist ----------
           if [ ! -f "$APP_DIR/.env" ]; then echo ".env missing in $APP_DIR"; exit 4; fi
 
           cd "$APP_DIR"
           export NPM_CONFIG_FUND=false
 
-          # Ensure lockfile exists (don’t fail if it doesn’t)
+          # Ensure lockfile exists (don’t fail if missing)
           if [ ! -f package-lock.json ]; then
-            set +e; npm install --package-lock-only; set -e
+            set +e
+            npm install --package-lock-only
+            set -e
           fi
 
-          # ----- Install deps (robust) -----
+          # ---------- Install deps (robust, no "||" chains) ----------
           set +e
           npm ci
           NPM_STATUS=$?
@@ -109,7 +97,7 @@ jobs:
           set -e
           if [ "$NPM_STATUS" -ne 0 ]; then echo "npm install failed"; exit 6; fi
 
-          # ----- PM2 ensure, then start/reload via npm start -----
+          # ---------- PM2 ensure ----------
           if ! command -v pm2 >/dev/null 2>&1; then
             npm i -g pm2
           fi
@@ -117,7 +105,7 @@ jobs:
           if [ -z "$PM2_PATH" ]; then echo "pm2 not found after install"; exit 5; fi
           echo "Using PM2 at: $PM2_PATH"
 
-          # Process exists?
+          # ---------- Start/reload via npm start ----------
           set +e
           "$PM2_PATH" describe "$APP_NAME" >/dev/null 2>&1
           EXISTS_STATUS=$?
@@ -129,27 +117,27 @@ jobs:
             while [ "$ATTEMPTS" -lt 3 ] && [ "$RC" -ne 0 ]; do
               "$PM2_PATH" reload "$APP_NAME" --update-env
               RC=$?
-              if [ "$RC" -ne 0 ]; then sleep 5; fi
+              if [ "$RC" -ne 0 ]; then
+                sleep 5
+              fi
               ATTEMPTS=$((ATTEMPTS+1))
             done
             if [ "$RC" -ne 0 ]; then
               "$PM2_PATH" restart "$APP_NAME"
             fi
           else
-            # Start with npm start (works for all your repos)
-            "$PM2_PATH" start npm --name "$APP_NAME" -- start
-            # Ensure the working directory is correct (best-effort)
-            "$PM2_PATH" set "$APP_NAME" cwd "$APP_DIR" >/dev/null 2>&1 || true
+            "$PM2_PATH" start npm --name "$APP_NAME" -- start --cwd "$APP_DIR"
           fi
 
-          # ----- Health check & logs on failure -----
           "$PM2_PATH" save
           sleep 4
 
+          # ---------- Health check ----------
           set +e
           "$PM2_PATH" describe "$APP_NAME" >/dev/null 2>&1
           DESCRIBE_RC=$?
           set -e
+
           if [ "$DESCRIBE_RC" -ne 0 ]; then
             echo "❌ PM2 does not see $APP_NAME as a managed process"
             "$PM2_PATH" logs "$APP_NAME" --lines 200 || true
@@ -158,12 +146,12 @@ jobs:
 
           "$PM2_PATH" status "$APP_NAME" || true
           SCRIPT
-          # ensure LF and executable
+
+          # ensure LF endings and executable bit
           sed -i 's/\r$//' /tmp/deploy_app.sh
           chmod +x /tmp/deploy_app.sh
 
-      - name: Upload & run deploy script on server (strip CR just in case)
+      - name: Upload & run deploy script on server
         run: |
           scp /tmp/deploy_app.sh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:/tmp/deploy_app.sh"
-          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "tr -d '\r' < /tmp/deploy_app.sh > /tmp/deploy_app.lf.sh && bash /tmp/deploy_app.lf.sh"
-          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "tr -d '\r' < /tmp/deploy_app.sh > /tmp/deploy_app.lf.sh && bash /tmp/deploy_app.lf.sh"
+          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "bash /tmp/deploy_app.sh"
