@@ -7,6 +7,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,8 +22,17 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H -p 22 ${{ secrets.DROPLET_HOST }} >> ~/.ssh/known_hosts
 
+      # Compute app directory and name once (universal across repos)
+      - name: Compute APP_DIR and APP_NAME
+        id: cfg
+        run: |
+          echo "APP_NAME=${GITHUB_REPOSITORY##*/}" >> "$GITHUB_OUTPUT"
+          echo "APP_DIR=${{ secrets.BASE_DIR }}/${GITHUB_REPOSITORY##*/}" >> "$GITHUB_OUTPUT"
+
       - name: Ensure remote directory exists
-        run: ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "mkdir -p '${{ secrets.REMOTE_DIR }}' '${{ secrets.REMOTE_DIR }}/data'"
+        run: |
+          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" \
+            "mkdir -p '${{ steps.cfg.outputs.APP_DIR }}' '${{ steps.cfg.outputs.APP_DIR }}/data'"
 
       - name: Rsync repo to droplet (preserve server data/)
         run: |
@@ -31,46 +41,16 @@ jobs:
             --exclude '.git' \
             --exclude '.github' \
             --exclude 'data/' \
-            ./  "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/"
-
-      - name: Prepare .env from ENV_FILE (runner only)
-        run: |
-          printf "%s" "${{ secrets.ENV_FILE }}" > .env.deploy
+            ./  "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ steps.cfg.outputs.APP_DIR }}/"
 
       - name: Upload .env to server
         run: |
-          scp .env.deploy "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/.env"
+          # write the secret to a temp file on runner
+          printf "%s" "${{ secrets.ENV_FILE }}" > .env.deploy
+          scp .env.deploy "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ steps.cfg.outputs.APP_DIR }}/.env"
           rm -f .env.deploy
 
-      - name: Build tiny deploy script (LF only, no comments)
+      - name: Deploy via permanent server script
         run: |
-          cat > /tmp/deploy_app.sh << 'SCRIPT'
-          #!/usr/bin/env bash
-          set -e
-          APP_DIR="${{ secrets.REMOTE_DIR }}"
-          APP_NAME="${{ secrets.APP_NAME }}"
-          APP_DIR="${APP_DIR%/}"
-          [ -n "$APP_DIR" ] || { echo "APP_DIR empty"; exit 2; }
-          [ -d "$APP_DIR" ] || { echo "APP_DIR missing: $APP_DIR"; exit 2; }
-          [ -n "$APP_NAME" ] || APP_NAME="$(basename "$APP_DIR")"
-          [ -n "$APP_NAME" ] || { echo "APP_NAME empty"; exit 3; }
-          cd "$APP_DIR"
-          [ -f .env ] || { echo ".env missing in $APP_DIR"; exit 4; }
-          node -v || true
-          npm -v || true
-          if [ -f package-lock.json ]; then npm ci || npm install; else npm install; fi
-          npm i -g pm2 || true
-          PM2="$(command -v pm2 || true)"
-          [ -n "$PM2" ] || { echo "pm2 not found after install"; exit 5; }
-          "$PM2" delete "$APP_NAME" || true
-          "$PM2" start npm --name "$APP_NAME" --cwd "$APP_DIR" -- start
-          "$PM2" save
-          "$PM2" status "$APP_NAME" || true
-          SCRIPT
-          sed -i 's/\r$//' /tmp/deploy_app.sh
-          chmod +x /tmp/deploy_app.sh
-
-      - name: Run deploy script on server
-        run: |
-          scp /tmp/deploy_app.sh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:/tmp/deploy_app.sh"
-          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "bash /tmp/deploy_app.sh"
+          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" \
+            "/usr/local/bin/deploy-app.sh '${{ steps.cfg.outputs.APP_DIR }}' '${{ steps.cfg.outputs.APP_NAME }}'"
