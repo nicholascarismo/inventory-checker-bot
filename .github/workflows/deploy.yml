@@ -47,14 +47,15 @@ jobs:
       - name: Build deploy script on runner
         run: |
           cat > /tmp/deploy_app.sh << 'SCRIPT'
-          set -eu
+          #!/usr/bin/env bash
+          set -e  # (intentionally NOT using -u to avoid "unbound variable")
 
           # ---------- Config from secrets ----------
           APP_DIR="${{ secrets.REMOTE_DIR }}"
           APP_NAME="${{ secrets.APP_NAME }}"
           APP_DIR="${APP_DIR%/}"   # strip trailing slash
 
-          # ---------- Basic PATH init (no pipes/|| in conditionals) ----------
+          # ---------- Basic PATH init ----------
           if [ -f "$HOME/.profile" ]; then . "$HOME/.profile"; fi
           if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
           if [ -f "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi
@@ -77,25 +78,18 @@ jobs:
 
           # Ensure lockfile exists (don’t fail if missing)
           if [ ! -f package-lock.json ]; then
-            set +e
-            npm install --package-lock-only
-            set -e
+            npm install --package-lock-only || true
           fi
 
-          # ---------- Install deps (robust, no "||" chains) ----------
-          set +e
-          npm ci
-          NPM_STATUS=$?
-          if [ "$NPM_STATUS" -ne 0 ]; then
-            npm install --production
-            NPM_STATUS=$?
-            if [ "$NPM_STATUS" -ne 0 ]; then
-              npm install
-              NPM_STATUS=$?
+          # ---------- Install deps (robust; no "$?" gymnastics) ----------
+          if ! npm ci; then
+            if ! npm install --production; then
+              if ! npm install; then
+                echo "npm install failed"
+                exit 6
+              fi
             fi
           fi
-          set -e
-          if [ "$NPM_STATUS" -ne 0 ]; then echo "npm install failed"; exit 6; fi
 
           # ---------- PM2 ensure ----------
           if ! command -v pm2 >/dev/null 2>&1; then
@@ -106,39 +100,22 @@ jobs:
           echo "Using PM2 at: $PM2_PATH"
 
           # ---------- Start/reload via npm start ----------
-          set +e
-          "$PM2_PATH" describe "$APP_NAME" >/dev/null 2>&1
-          EXISTS_STATUS=$?
-          set -e
-
-          if [ "$EXISTS_STATUS" -eq 0 ]; then
-            ATTEMPTS=0
-            RC=1
-            while [ "$ATTEMPTS" -lt 3 ] && [ "$RC" -ne 0 ]; do
-              "$PM2_PATH" reload "$APP_NAME" --update-env
-              RC=$?
-              if [ "$RC" -ne 0 ]; then
-                sleep 5
-              fi
-              ATTEMPTS=$((ATTEMPTS+1))
-            done
-            if [ "$RC" -ne 0 ]; then
-              "$PM2_PATH" restart "$APP_NAME"
+          # (IMPORTANT: --cwd must come BEFORE "npm -- start" so PM2 applies it)
+          if "$PM2_PATH" describe "$APP_NAME" >/dev/null 2>&1; then
+            # reload can return "reload already in progress" → try restart as fallback
+            if ! "$PM2_PATH" reload "$APP_NAME" --update-env; then
+              sleep 5
+              "$PM2_PATH" restart "$APP_NAME" --update-env || true
             fi
           else
-            "$PM2_PATH" start npm --name "$APP_NAME" -- start --cwd "$APP_DIR"
+            "$PM2_PATH" start npm --name "$APP_NAME" --cwd "$APP_DIR" -- start
           fi
 
           "$PM2_PATH" save
           sleep 4
 
           # ---------- Health check ----------
-          set +e
-          "$PM2_PATH" describe "$APP_NAME" >/dev/null 2>&1
-          DESCRIBE_RC=$?
-          set -e
-
-          if [ "$DESCRIBE_RC" -ne 0 ]; then
+          if ! "$PM2_PATH" describe "$APP_NAME" >/dev/null 2>&1; then
             echo "❌ PM2 does not see $APP_NAME as a managed process"
             "$PM2_PATH" logs "$APP_NAME" --lines 200 || true
             exit 7
