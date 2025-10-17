@@ -43,24 +43,20 @@ jobs:
           scp .env.deploy "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/.env"
           rm -f .env.deploy
 
-      # Build the deployment script on the runner (LF line endings)
-      - name: Build deploy script on runner
+      - name: Build deploy script on runner (LF only)
         run: |
           cat > /tmp/deploy_app.sh << 'SCRIPT'
           #!/usr/bin/env bash
-          set -e  # (intentionally NOT using -u to avoid "unbound variable")
+          set -e
 
-          # ---------- Config from secrets ----------
           APP_DIR="${{ secrets.REMOTE_DIR }}"
           APP_NAME="${{ secrets.APP_NAME }}"
-          APP_DIR="${APP_DIR%/}"   # strip trailing slash
+          APP_DIR="${APP_DIR%/}"
 
-          # ---------- Basic PATH init ----------
           if [ -f "$HOME/.profile" ]; then . "$HOME/.profile"; fi
           if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
-          if [ -f "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi
+          # do NOT auto-install nvm here; your server already has node
 
-          # ---------- Sanity checks ----------
           if [ -z "$APP_DIR" ]; then echo "APP_DIR empty"; exit 2; fi
           if [ ! -d "$APP_DIR" ]; then echo "APP_DIR missing: $APP_DIR"; exit 2; fi
           if [ -z "$APP_NAME" ]; then APP_NAME="$(basename "$APP_DIR")"; fi
@@ -68,20 +64,19 @@ jobs:
 
           echo "APP_DIR=$APP_DIR"
           echo "APP_NAME=$APP_NAME"
-          ls -la "$APP_DIR"
+          node -v || true
+          npm -v || true
+          ls -la "$APP_DIR" || true
 
-          # ---------- .env must exist ----------
           if [ ! -f "$APP_DIR/.env" ]; then echo ".env missing in $APP_DIR"; exit 4; fi
 
           cd "$APP_DIR"
           export NPM_CONFIG_FUND=false
 
-          # Ensure lockfile exists (don’t fail if missing)
           if [ ! -f package-lock.json ]; then
             npm install --package-lock-only || true
           fi
 
-          # ---------- Install deps (robust; no "$?" gymnastics) ----------
           if ! npm ci; then
             if ! npm install --production; then
               if ! npm install; then
@@ -91,7 +86,6 @@ jobs:
             fi
           fi
 
-          # ---------- PM2 ensure ----------
           if ! command -v pm2 >/dev/null 2>&1; then
             npm i -g pm2
           fi
@@ -99,32 +93,28 @@ jobs:
           if [ -z "$PM2_PATH" ]; then echo "pm2 not found after install"; exit 5; fi
           echo "Using PM2 at: $PM2_PATH"
 
-          # ---------- Start/reload via npm start ----------
-          # (IMPORTANT: --cwd must come BEFORE "npm -- start" so PM2 applies it)
+          # prefer reload; if pm2 says "reload in progress", restart
           if "$PM2_PATH" describe "$APP_NAME" >/dev/null 2>&1; then
-            # reload can return "reload already in progress" → try restart as fallback
             if ! "$PM2_PATH" reload "$APP_NAME" --update-env; then
               sleep 5
               "$PM2_PATH" restart "$APP_NAME" --update-env || true
             fi
           else
-            "$PM2_PATH" start npm --name "$APP_NAME" --cwd "$APP_DIR" -- start
+            # start via npm start, with correct cwd
+            "$PM2_PATH" start "npm -- start" --name "$APP_NAME" --cwd "$APP_DIR"
           fi
 
           "$PM2_PATH" save
-          sleep 4
+          sleep 3
 
-          # ---------- Health check ----------
           if ! "$PM2_PATH" describe "$APP_NAME" >/dev/null 2>&1; then
-            echo "❌ PM2 does not see $APP_NAME as a managed process"
+            echo "PM2 does not see $APP_NAME; recent logs:"
             "$PM2_PATH" logs "$APP_NAME" --lines 200 || true
             exit 7
           fi
 
           "$PM2_PATH" status "$APP_NAME" || true
           SCRIPT
-
-          # ensure LF endings and executable bit
           sed -i 's/\r$//' /tmp/deploy_app.sh
           chmod +x /tmp/deploy_app.sh
 
