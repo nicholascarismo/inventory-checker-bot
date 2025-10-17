@@ -74,10 +74,11 @@ jobs:
           "$PM2" save
           "$PM2" status "$APP_NAME" || true
           SCRIPT
-          sed -i 's/\r$//' /tmp/deploy_app.sh
+          # also remove CR locally for good measure
+          perl -pi -e 's/\r//g' /tmp/deploy_app.sh
           chmod +x /tmp/deploy_app.sh
 
-      - name: Run deploy script on server
+      - name: Upload & run deploy script on server (strip CR on server too)
         run: |
           scp /tmp/deploy_app.sh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:/tmp/deploy_app.sh"
-          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "bash /tmp/deploy_app.sh"
+          ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "tr -d '\r' < /tmp/deploy_app.sh > /tmp/deploy_app.lf.sh && chmod +x /tmp/deploy_app.lf.sh && bash /tmp/deploy_app.lf.sh"
