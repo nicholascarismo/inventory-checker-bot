@@ -51,10 +51,12 @@ jobs:
           APP_NAME="${{ secrets.APP_NAME }}"
           APP_DIR="${APP_DIR%/}"
 
+          # login-like PATH
           if [ -f "$HOME/.profile" ]; then . "$HOME/.profile"; fi
           if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
           if [ -f "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi
 
+          # sanity
           if [ -z "$APP_DIR" ]; then echo "APP_DIR empty"; exit 2; fi
           if [ ! -d "$APP_DIR" ]; then echo "APP_DIR missing: $APP_DIR"; exit 2; fi
           if [ -z "$APP_NAME" ]; then APP_NAME="$(basename "$APP_DIR")"; fi
@@ -64,44 +66,35 @@ jobs:
           echo "APP_NAME=$APP_NAME"
           ls -la "$APP_DIR"
 
+          # .env must exist
           if [ ! -f "$APP_DIR/.env" ]; then echo ".env missing in $APP_DIR"; exit 4; fi
 
           cd "$APP_DIR"
           export NPM_CONFIG_FUND=false
 
+          # ensure lockfile exists for reproducible installs (don’t fail if it doesn’t)
           if [ ! -f package-lock.json ]; then
+            set +e
             npm install --package-lock-only
+            set -e
           fi
 
-          NPM_MAJOR=""
+          # Install: try ci, then production, then full
           set +e
-          NPM_MAJOR="$(node -p "process.versions.npm && process.versions.npm.split('.')[0]" 2>/dev/null)"
-          if [ -z "$NPM_MAJOR" ]; then
-            NPM_MAJOR="$(npm -v 2>/dev/null | cut -d. -f1 | tr -cd '0-9')"
+          npm ci
+          NPM_STATUS=$?
+          if [ "$NPM_STATUS" -ne 0 ]; then
+            npm install --production
+            NPM_STATUS=$?
+            if [ "$NPM_STATUS" -ne 0 ]; then
+              npm install
+              NPM_STATUS=$?
+            fi
           fi
           set -e
-          if [ -z "$NPM_MAJOR" ]; then NPM_MAJOR="7"; fi
+          if [ "$NPM_STATUS" -ne 0 ]; then echo "npm install failed"; exit 6; fi
 
-          NPM_STATUS=0
-          if [ "$NPM_MAJOR" -ge 7 ]; then
-            set +e
-            npm ci --omit=dev
-            NPM_STATUS=$?
-            set -e
-          else
-            set +e
-            npm ci --only=production
-            NPM_STATUS=$?
-            set -e
-          fi
-          if [ "$NPM_STATUS" -ne 0 ]; then
-            set +e
-            npm ci
-            NPM_STATUS=$?
-            set -e
-          fi
-          if [ "$NPM_STATUS" -ne 0 ]; then echo "npm ci failed"; exit 6; fi
-
+          # Ensure pm2 exists
           if ! command -v pm2 >/dev/null 2>&1; then
             npm i -g pm2
           fi
@@ -109,12 +102,15 @@ jobs:
           if [ -z "$PM2_PATH" ]; then echo "pm2 not found after install"; exit 5; fi
           echo "Using PM2 at: $PM2_PATH"
 
+          # Detect if a process with this name already exists
           set +e
           "$PM2_PATH" describe "$APP_NAME" >/dev/null 2>&1
           EXISTS_STATUS=$?
           set -e
 
+          # Universal entrypoint: use npm start (every repo you pasted has it)
           if [ "$EXISTS_STATUS" -eq 0 ]; then
+            # try reload, tolerate busy state by retry then restart
             ATTEMPTS=0
             RC=1
             while [ "$ATTEMPTS" -lt 3 ] && [ "$RC" -ne 0 ]; do
@@ -127,11 +123,16 @@ jobs:
               "$PM2_PATH" restart "$APP_NAME"
             fi
           else
-            "$PM2_PATH" start index.js --name "$APP_NAME" --cwd "$APP_DIR"
+            # pm2 running npm start
+            "$PM2_PATH" start npm --name "$APP_NAME" -- start
+            # ensure working directory is correct
+            "$PM2_PATH" set "$APP_NAME" cwd "$APP_DIR" >/dev/null 2>&1 || true
           fi
 
           "$PM2_PATH" save
           SCRIPT
+          # ensure LF and executable
+          sed -i 's/\r$//' /tmp/deploy_app.sh
           chmod +x /tmp/deploy_app.sh
 
       - name: Upload & run deploy script on server (strip CR just in case)
