@@ -43,7 +43,7 @@ jobs:
           scp .env.deploy "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:${{ secrets.REMOTE_DIR }}/.env"
           rm -f .env.deploy
 
-      - name: Build deploy script on runner (LF only)
+      - name: Build minimal deploy script (LF only)
         run: |
           cat > /tmp/deploy_app.sh << 'SCRIPT'
           #!/usr/bin/env bash
@@ -53,72 +53,43 @@ jobs:
           APP_NAME="${{ secrets.APP_NAME }}"
           APP_DIR="${APP_DIR%/}"
 
-          if [ -f "$HOME/.profile" ]; then . "$HOME/.profile"; fi
-          if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
-          # do NOT auto-install nvm here; your server already has node
-
-          if [ -z "$APP_DIR" ]; then echo "APP_DIR empty"; exit 2; fi
-          if [ ! -d "$APP_DIR" ]; then echo "APP_DIR missing: $APP_DIR"; exit 2; fi
-          if [ -z "$APP_NAME" ]; then APP_NAME="$(basename "$APP_DIR")"; fi
-          if [ -z "$APP_NAME" ]; then echo "APP_NAME empty"; exit 3; fi
-
-          echo "APP_DIR=$APP_DIR"
-          echo "APP_NAME=$APP_NAME"
-          node -v || true
-          npm -v || true
-          ls -la "$APP_DIR" || true
-
-          if [ ! -f "$APP_DIR/.env" ]; then echo ".env missing in $APP_DIR"; exit 4; fi
+          [ -n "$APP_DIR" ] || { echo "APP_DIR empty"; exit 2; }
+          [ -d "$APP_DIR" ] || { echo "APP_DIR missing: $APP_DIR"; exit 2; }
+          [ -n "$APP_NAME" ] || APP_NAME="$(basename "$APP_DIR")"
+          [ -n "$APP_NAME" ] || { echo "APP_NAME empty"; exit 3; }
 
           cd "$APP_DIR"
-          export NPM_CONFIG_FUND=false
+          [ -f .env ] || { echo ".env missing in $APP_DIR"; exit 4; }
 
-          if [ ! -f package-lock.json ]; then
-            npm install --package-lock-only || true
+          # show versions (helps debug)
+          node -v || true
+          npm -v || true
+
+          # deps: prefer ci if lockfile exists
+          if [ -f package-lock.json ]; then
+            npm ci || npm install --production || npm install
+          else
+            npm install --production || npm install
           fi
 
-          if ! npm ci; then
-            if ! npm install --production; then
-              if ! npm install; then
-                echo "npm install failed"
-                exit 6
-              fi
-            fi
-          fi
-
+          # pm2: ensure installed and get absolute path
           if ! command -v pm2 >/dev/null 2>&1; then
             npm i -g pm2
           fi
-          PM2_PATH="$(command -v pm2 || echo "")"
-          if [ -z "$PM2_PATH" ]; then echo "pm2 not found after install"; exit 5; fi
-          echo "Using PM2 at: $PM2_PATH"
+          PM2="$(command -v pm2 || echo "")"
+          [ -n "$PM2" ] || { echo "pm2 not found after install"; exit 5; }
 
-          # prefer reload; if pm2 says "reload in progress", restart
-          if "$PM2_PATH" describe "$APP_NAME" >/dev/null 2>&1; then
-            if ! "$PM2_PATH" reload "$APP_NAME" --update-env; then
-              sleep 5
-              "$PM2_PATH" restart "$APP_NAME" --update-env || true
-            fi
-          else
-            # start via npm start, with correct cwd
-            "$PM2_PATH" start "npm -- start" --name "$APP_NAME" --cwd "$APP_DIR"
-          fi
-
-          "$PM2_PATH" save
-          sleep 3
-
-          if ! "$PM2_PATH" describe "$APP_NAME" >/dev/null 2>&1; then
-            echo "PM2 does not see $APP_NAME; recent logs:"
-            "$PM2_PATH" logs "$APP_NAME" --lines 200 || true
-            exit 7
-          fi
-
-          "$PM2_PATH" status "$APP_NAME" || true
+          # idempotent: delete then start (avoids 'reload in progress')
+          "$PM2" delete "$APP_NAME" || true
+          "$PM2" start npm --name "$APP_NAME" --cwd "$APP_DIR" -- start
+          "$PM2" save
+          "$PM2" status "$APP_NAME" || true
           SCRIPT
+          # force LF and executable bit
           sed -i 's/\r$//' /tmp/deploy_app.sh
           chmod +x /tmp/deploy_app.sh
 
-      - name: Upload & run deploy script on server
+      - name: Run deploy script on server
         run: |
           scp /tmp/deploy_app.sh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}:/tmp/deploy_app.sh"
           ssh "${{ secrets.DROPLET_USER }}@${{ secrets.DROPLET_HOST }}" "bash /tmp/deploy_app.sh"
